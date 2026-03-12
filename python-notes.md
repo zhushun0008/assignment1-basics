@@ -425,10 +425,53 @@ conda config --set auto_activate_base false
 
 ### 6.3 uv 包管理
 
+uv 是一个快速的 Python 包管理器，替代 pip + venv + pip-tools。
+
+#### 基本命令
+
 ```bash
-uv add ipython jupyter jupyterlab
+# 添加生产依赖
+uv add torch numpy
+
+# 添加开发依赖
+uv add --dev pytest scalene snakeviz
+
+# 运行命令
+uv run python script.py
+uv run pytest tests/
 uv run jupyter lab
 ```
+
+#### `--dev` 参数原理
+
+`uv add --dev` 将包安装为**开发依赖**，与生产依赖分开管理。
+
+| 类型 | 命令 | 存放位置 | 用途 |
+|------|------|----------|------|
+| 生产依赖 | `uv add package` | `[project.dependencies]` | 运行项目必需 |
+| 开发依赖 | `uv add --dev package` | `[dependency-groups.dev]` | 仅开发/测试时需要 |
+
+**pyproject.toml 示例**：
+
+```toml
+[project]
+dependencies = [
+    "torch",       # 生产依赖
+    "numpy",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",      # 开发依赖
+    "scalene",
+    "snakeviz",
+]
+```
+
+**为什么要区分**：
+1. **部署更轻量**：生产环境只安装 `dependencies`，不装测试工具
+2. **依赖清晰**：明确哪些是核心依赖，哪些是辅助工具
+3. **安装更快**：`uv sync --no-dev` 可跳过开发依赖
 
 ---
 
@@ -572,3 +615,201 @@ list(gen)  # [4, 6, 8]（剩余元素）
 # 集合推导
 {x % 3 for x in range(10)}  # {0, 1, 2}
 ```
+
+---
+
+## 10. 性能分析 (Profiling)
+
+性能分析用于找出代码中的性能瓶颈，主要有两类工具：
+
+| 类型 | 代表工具 | 原理 | 粒度 |
+|------|----------|------|------|
+| **确定性分析** | cProfile | 在每个函数入口/出口插入钩子 | 函数级 |
+| **采样分析** | Scalene | 定期中断程序，查看当前执行位置 | 行级 |
+
+### 10.1 cProfile
+
+Python 内置的性能分析器，记录每个函数的调用次数和耗时。
+
+**原理**：在每个函数调用的入口和出口插入钩子，记录时间戳，计算耗时。
+
+**优点**：
+- 内置，无需安装
+- 精确记录每次函数调用
+
+**缺点**：
+- 只能分析到函数级别，无法定位到具体哪一行慢
+- 有一定运行开销
+
+#### 命令行使用（推荐）
+
+```bash
+# 直接运行脚本，按累计时间排序输出
+python -m cProfile -s cumtime your_script.py
+
+# 输出到文件，用 snakeviz 可视化
+python -m cProfile -o output.prof your_script.py
+snakeviz output.prof  # 在浏览器中打开
+
+# 配合 pytest 分析测试
+python -m cProfile -o test.prof -m pytest tests/test_xxx.py -v
+snakeviz test.prof
+
+# 使用 uv 运行
+uv run python -m cProfile -s cumtime tests/your_script.py
+uv run python -m cProfile -o output.prof tests/your_script.py
+uv run snakeviz output.prof
+```
+
+#### 代码中使用
+
+```python
+import cProfile
+import pstats
+
+profiler = cProfile.Profile()
+profiler.enable()
+
+# 要分析的代码
+result = some_function()
+
+profiler.disable()
+stats = pstats.Stats(profiler)
+stats.sort_stats('cumulative')  # 按累计时间排序
+stats.print_stats(20)           # 打印前 20 行
+```
+
+#### 输出字段解读
+
+```
+ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+  100    0.500    0.005    1.200    0.012 module.py:10(slow_func)
+```
+
+| 字段 | 含义 |
+|------|------|
+| **ncalls** | 调用次数（`100/50` 表示总调用 100 次，其中 50 次非递归） |
+| **tottime** | 函数自身耗时（不含子函数） |
+| **percall** | tottime / ncalls |
+| **cumtime** | 累计耗时（含子函数调用） |
+| **percall** | cumtime / ncalls |
+
+#### snakeviz 可视化解读
+
+snakeviz 用 **Icicle 图（冰柱图）** 展示调用关系：
+
+```
+蓝色   main()                    10s    ← 顶层函数
+  └─ 橙色   process()             8s     ← 被调用的函数
+       └─ 绿色   deepcopy()       5s     ← 子函数（瓶颈！）
+```
+
+- **从上往下**：表示调用层级
+- **宽度**：表示时间占比，越宽耗时越多
+- **点击色块**：可以放大查看细节
+
+### 10.2 Scalene
+
+高性能采样分析器，支持行级分析、内存分析、区分 Python/Native 代码。
+
+**原理**：使用独立进程定期采样，查看当前执行到哪一行，统计分析（开销 < 5%）。
+
+**优点**：
+- **行级分析**：精确到每一行代码的耗时
+- **区分 CPU vs 内存**：分别显示 CPU 时间和内存分配
+- **区分 Python vs Native**：区分纯 Python 代码和 C 扩展/NumPy 的耗时
+- 开销低
+
+**缺点**：
+- 需要安装
+- 采样可能遗漏极短的函数调用
+
+#### 安装
+
+```bash
+uv add --dev scalene snakeviz
+```
+
+#### 命令行使用
+
+```bash
+# 基本使用
+scalene run your_script.py
+
+# 使用 uv 运行
+uv run scalene run tests/your_script.py
+
+# 只分析 CPU（不分析内存，更快）
+uv run scalene --cpu-only run your_script.py
+
+# 生成 HTML 报告
+uv run scalene --html --outfile report.html run your_script.py
+
+# 查看结果
+uv run scalene view        # 在浏览器中打开
+uv run scalene view --cli  # 在终端中查看
+```
+
+#### 输出解读
+
+```
+               TIME              MEMORY
+Line   %Python  %Native   %Alloc  Code
+  45     35%      10%       5%    for pair in pairs:
+  46     20%       0%      15%        counts[pair] += 1
+```
+
+| 列 | 含义 |
+|---|---|
+| **TIME** (绿色条) | CPU 时间占比 |
+| **%Python** | 纯 Python 代码耗时占比 |
+| **%Native** | C 扩展/NumPy 等原生代码耗时占比 |
+| **MEMORY peak** | 内存峰值 |
+| **MEMORY average** | 平均内存使用 |
+| **%Alloc** | 内存分配占比 |
+| **COPY** | 内存拷贝操作 |
+
+行号旁的数字（如 `6`、`7`）表示该行占用的 CPU 时间百分比。
+
+### 10.3 对比总结
+
+| 特性 | cProfile | Scalene |
+|------|----------|---------|
+| 分析粒度 | 函数级别 | 行级别 |
+| 内存分析 | ❌ | ✅ |
+| 区分 Python/Native | ❌ | ✅ |
+| 运行开销 | 中等 | 低 |
+| 安装 | 内置 | 需安装 |
+| 可视化 | snakeviz | 内置 HTML/CLI |
+
+### 10.4 实际优化案例
+
+使用 Scalene 发现 BPE 训练代码的瓶颈：
+
+```python
+# 第 110 行占用 20% 的时间！
+wc_bytes_dict = deepcopy(new_wc_bytes_dict)
+```
+
+**问题**：`deepcopy` 递归复制所有嵌套对象，非常慢。
+
+**分析**：`new_wc_bytes_dict` 是新创建的字典，key 是 tuple（不可变），value 是 int（不可变），不需要深拷贝。
+
+**优化**：直接赋值即可。
+
+```python
+# 优化前
+wc_bytes_dict = deepcopy(new_wc_bytes_dict)  # 20% 时间
+
+# 优化后
+wc_bytes_dict = new_wc_bytes_dict  # O(1)
+```
+
+**其他常见优化点**：
+
+| 问题 | 优化方案 |
+|------|----------|
+| 循环中重复计算 `len()` | 缓存到变量 `n = len(data)` |
+| 重复切片 | 切片一次存入变量 |
+| 每次迭代重新统计频率 | 增量更新，只更新受影响的部分 |
+| 遍历找最大值 | 使用堆（heapq）维护 |

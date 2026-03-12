@@ -53,6 +53,13 @@ line-length = 120
 # Also ignore `E402` in all `__init__.py` files.
 "__init__.py" = ["E402", "F401", "F403", "E501"]
 
+[dependency-groups]
+dev = [
+    "gprof2dot>=2025.4.14",
+    "pytest-profiling>=1.8.1",
+    "snakeviz>=2.2.2",
+]
+
 [tool.ruff.lint]
 extend-select = ["UP"]
 ignore = [

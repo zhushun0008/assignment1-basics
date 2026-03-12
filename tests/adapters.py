@@ -11,7 +11,7 @@ from torch import Tensor
 import regex as re
 from copy import deepcopy
 import sys
-from cs336_basics import 
+
 print(sys.executable)
 
 def run_linear(

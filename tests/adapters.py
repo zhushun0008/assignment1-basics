@@ -9,10 +9,14 @@ import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 import regex as re
-from copy import deepcopy
+
+from cs336_basics.bpe_utils import init_vocab, pre_tokenize, bpe_merge, opt_bpe_merge
 import sys
 
 print(sys.executable)
+import cProfile
+import pstats
+
 
 def run_linear(
     d_in: int,
@@ -569,10 +573,6 @@ def get_tokenizer(
     raise NotImplementedError
 
 
-def str_to_bts_tuple(input_str: str, encoding: str = "utf-8"):
-    return tuple(bytes([b]) for b in input_str.encode(encoding))
-
-
 def run_train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
@@ -601,128 +601,21 @@ def run_train_bpe(
                 Merges are ordered by order of creation.
     """
     
-    vocab = dict()
-    # 1. init vocab with bytes
-    # 1.1. add special token
-    # special_tokens = ['<|endoftext|>)']
-    for s in special_tokens:
-        s_bts = s.encode("utf-8")
-        vocab[len(vocab)] = s_bts
-        # print(s_bts)
-    # add the 256 byte value
-    for i in range(256):
-        # vocab[len(vocab)] = chr(i).encode("utf-8")
-        vocab[len(vocab)] = bytes([i])
+
+    
+    # 1. init vocab
+    vocab = init_vocab(special_tokens)
 
     # 2. pre-tokenize
-    # input_path = None
-    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-    # PAT = r"""\S+"""
+    wc_bytes_dict = pre_tokenize(input_path, special_tokens)
 
-    # input_text = None
-
-    with open(input_path, 'r', encoding='utf-8') as f:
-        input_text = f.read()
-
-    # input_text = "low low low low low lower lower widest widest widest newest newest newest newest newest newest"
-    doc_delimit = "|".join([re.escape(s) for s in special_tokens])
-    doc_list = re.split(doc_delimit, input_text)
-    
-    # wc_dict = {}
-    wc_bytes_dict = {}
-    
-    for tmp_doc in doc_list:
-        # raw_data = input_text.split()
-        # raw_data = re.findall(PAT, tmp_doc)
-        raw_data = re.finditer(PAT, tmp_doc)
-        for m in raw_data:
-            # w = m
-            w = m.group()
-            w_bts = str_to_bts_tuple(w)
-            # w_bts = tuple(w.encode('utf-8'))
-            # wc_dict[tuple(w)] = wc_dict.get(tuple(w), 0) + 1
-            # print(w_bts, wc_bytes_dict.get(w_bts, 0))
-            wc_bytes_dict[w_bts] = wc_bytes_dict.get(w_bts, 0) + 1
-
-    # 3. merges
-    merges = []
-    max_merge_runs = None
-    cur_run = 0
-    # vocab_size = 500
-    while len(vocab) < vocab_size and (max_merge_runs is None or cur_run < max_merge_runs):
-
-        pair_cnt_dict = {}
-        max_freq = 0
-        # max_pair = None
-        # count the frequency of each pair
-        # find the most frequent pair
-        for w_bts, cnt in wc_bytes_dict.items():
-
-            # print(w_bts)
-            # w = w_bts.decode('utf-8')
-            # print(w)
-            for i in range(len(w_bts) - 1):
-                pair = w_bts[i : i + 2]
-                pair_cnt_dict[pair] = pair_cnt_dict.get(pair, 0) + cnt
-                if pair_cnt_dict[pair] > max_freq:
-                    max_freq = pair_cnt_dict[pair]
-                    # max_pair = pair
-        # take the lexicographically greater pair
-        max_freq_pair_list = []
-        for pair, cnt in pair_cnt_dict.items():
-            if cnt == max_freq:
-                max_freq_pair_list.append(pair)
-
-        max_pair = max(max_freq_pair_list)
-        merges.append(max_pair)
-        vocab[len(vocab)] = b"".join(max_pair)
-
-        new_wc_bytes_dict = dict()
-        for w_bts, cnt in wc_bytes_dict.items():
-            i = 0
-            merged_w_bts_list = []
-            # handle one pre-token
-            while i < len(w_bts):
-                # last char
-                if i == len(w_bts) - 1:
-                    merged_w_bts_list.append(w_bts[i])
-                    break
-
-                if w_bts[i : i + 2] == max_pair:
-                    merged_w_bts_list.append(b"".join(w_bts[i : i + 2]))
-                    i += 2
-                else:
-                    merged_w_bts_list.append(w_bts[i])
-                    i += 1
-            new_wc_bytes_dict[tuple(merged_w_bts_list)] = cnt
-
-        wc_bytes_dict = deepcopy(new_wc_bytes_dict)
-        cur_run += 1
-        # print(
-        #     f"run:{cur_run}, max_pair:{max_pair}, max_freq: {max_freq}, wc_bytes_dict: {wc_bytes_dict}, vocab:{vocab}"
-        # )
+    # 3. bpe merge
+    # (vocab, merges) = bpe_merge(vocab, wc_bytes_dict, vocab_size)
+    (vocab, merges) = opt_bpe_merge(vocab, wc_bytes_dict, vocab_size)
 
     return (vocab, merges)
 
-# input_path = "/Volumes/ExtremeSSD/github/lmfs_sfd/assignment1-basics/data/TinyStoriesV2-GPT4-train.txt"
 
-# input_path = "/Volumes/ExtremeSSD/github/lmfs_sfd/assignment1-basics/data/tiny_valid_mini.txt"
-# input_path = "/Volumes/ExtremeSSD/github/lmfs_sfd/assignment1-basics/data/tiny_valid_mini.txt"
-
-# vocab_size = 10000
-# special_tokens = ['<|endoftext|>']
-# (vocab, merges) = run_train_bpe(input_path, vocab_size, special_tokens)
-# print(vocab)
-# print(merges)
-# input_path = "/Volumes/ExtremeSSD/github/lmfs_sfd/assignment1-basics/tests/fixtures/corpus.en"
-# vocab, merges = run_train_bpe(
-#     input_path=input_path,
-#     vocab_size=500,
-#     special_tokens=["<|endoftext|>"],
-# )
-# for merge in merges:
-#     print(merge)
-# print(vocab)
 
 ###################################################################################
 # 1. 利用special tokens 切割文件 from str to str list
@@ -730,3 +623,31 @@ def run_train_bpe(
 # to [""adfsfe few wf f wf wfw wef  ", "fdsffwejngill  fgewgrh  ", " ffewfw "]
 #
 ###################################################################################
+input_path = ""
+# input_path = "/Volumes/ExtremeSSD/github/lmfs_sfd/assignment1-basics/data/TinyStoriesV2-GPT4-train.txt"
+
+# input_path = "/Volumes/ExtremeSSD/github/lmfs_sfd/assignment1-basics/data/tiny_valid_mini.txt"
+# input_path = "/Volumes/ExtremeSSD/github/lmfs_sfd/assignment1-basics/data/tiny_valid_mini.txt"
+
+# vocab_size = 10000
+# special_tokens = ['<|endoftext|>']
+# print(vocab)
+# print(merges)
+
+# profiler = cProfile.Profile()
+# profiler.enable()
+
+vocab, merges = run_train_bpe(
+    input_path="/Volumes/ExtremeSSD/github/lmfs_sfd/assignment1-basics/data/TinyStoriesV2-GPT4-valid.txt",
+    vocab_size=10000,
+    special_tokens=["<|endoftext|>"])
+
+# vocab, merges = run_train_bpe(
+#     input_path="/Volumes/ExtremeSSD/github/lmfs_sfd/assignment1-basics/tests/fixtures/corpus.en",
+#     vocab_size=500,
+#     special_tokens=["<|endoftext|>"])
+
+# profiler.disable()
+# stats = pstats.Stats(profiler)
+# stats.sort_stats('cumulative')  # 按累计时间排序
+# stats.print_stats(20)  # 打印前 20 行

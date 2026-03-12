@@ -19,6 +19,14 @@ dependencies = [
     "tqdm>=4.67.1",
     "wandb>=0.19.7",
     "ty>=0.0.1a16",
+    "ipython>=9.10.0",
+    "jupyter>=1.1.1",
+    "jupyterlab>=4.5.5",
+    "jupyterlab-lsp>=5.2.0",
+    "python-lsp-server>=1.14.0",
+    "ipykernel>=7.2.0",
+    "scalene>=2.1.4",
+    "snakeviz>=2.2.2",
 ]
 
 [build-system]

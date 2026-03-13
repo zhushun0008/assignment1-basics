@@ -425,53 +425,45 @@ conda config --set auto_activate_base false
 
 ### 6.3 uv 包管理
 
-uv 是一个快速的 Python 包管理器，替代 pip + venv + pip-tools。
+uv 是一个用 Rust 实现的快速 Python 包管理器，替代 pip + venv + pip-tools + pyenv。
 
-#### 基本命令
+> **详细原理文档**：[uv-venv-internals.md](./uv-venv-internals.md)（含 `uv venv` 创建流程、`uv run` 完整工作原理、依赖解析与缓存机制、常见问题等）
+
+#### 常用命令速查
 
 ```bash
-# 添加生产依赖
-uv add torch numpy
+# 依赖管理
+uv add torch numpy              # 添加生产依赖
+uv add --dev pytest scalene     # 添加开发依赖
+uv sync                         # 安装主依赖 + dev 组
+uv sync --no-dev                # 只装主依赖
+uv sync --group test            # 主依赖 + dev 组 + test 组
 
-# 添加开发依赖
-uv add --dev pytest scalene snakeviz
-
-# 运行命令
+# 一键运行（自动创建 venv + 安装依赖 + 执行命令）
 uv run python script.py
 uv run pytest tests/
 uv run jupyter lab
+
+# 环境管理
+uv venv                         # 创建虚拟环境（读取 .python-version）
+uv venv --python 3.12           # 指定 Python 版本
 ```
 
-#### `--dev` 参数原理
-
-`uv add --dev` 将包安装为**开发依赖**，与生产依赖分开管理。
+#### 生产依赖 vs 开发依赖
 
 | 类型 | 命令 | 存放位置 | 用途 |
 |------|------|----------|------|
 | 生产依赖 | `uv add package` | `[project.dependencies]` | 运行项目必需 |
 | 开发依赖 | `uv add --dev package` | `[dependency-groups.dev]` | 仅开发/测试时需要 |
 
-**pyproject.toml 示例**：
+#### 可移植配置（需提交到 git）
 
-```toml
-[project]
-dependencies = [
-    "torch",       # 生产依赖
-    "numpy",
-]
-
-[dependency-groups]
-dev = [
-    "pytest",      # 开发依赖
-    "scalene",
-    "snakeviz",
-]
 ```
-
-**为什么要区分**：
-1. **部署更轻量**：生产环境只安装 `dependencies`，不装测试工具
-2. **依赖清晰**：明确哪些是核心依赖，哪些是辅助工具
-3. **安装更快**：`uv sync --no-dev` 可跳过开发依赖
+pyproject.toml          ← 项目依赖和配置
+.python-version         ← 锁定 Python 版本（如 "3.12"）
+uv.lock                 ← 锁定所有依赖的精确版本
+.gitignore              ← 包含 .venv/
+```
 
 ---
 
@@ -732,6 +724,8 @@ uv add --dev scalene snakeviz
 
 #### 命令行使用
 
+命令格式：`scalene run [选项] <脚本>`（选项放在 `run` 之后）
+
 ```bash
 # 基本使用
 scalene run your_script.py
@@ -739,16 +733,26 @@ scalene run your_script.py
 # 使用 uv 运行
 uv run scalene run tests/your_script.py
 
+# 分析所有导入的模块（重要！默认只分析入口脚本）
+uv run scalene run --profile-all tests/adapters.py
+
+# 以模块方式运行（-m 后跟点分模块名，不是文件路径）
+uv run scalene run --profile-all -m cs336_basics.some_module
+
 # 只分析 CPU（不分析内存，更快）
-uv run scalene --cpu-only run your_script.py
+uv run scalene run --cpu-only tests/your_script.py
 
 # 生成 HTML 报告
-uv run scalene --html --outfile report.html run your_script.py
+uv run scalene run --html --outfile report.html your_script.py
 
 # 查看结果
 uv run scalene view        # 在浏览器中打开
 uv run scalene view --cli  # 在终端中查看
 ```
+
+**`--profile-all` 的作用**：默认情况下 Scalene 只分析入口脚本文件的耗时。如果你的测试脚本（如 `tests/adapters.py`）调用了 `cs336_basics/bpe_utils.py` 中的函数，不加 `--profile-all` 时 `bpe_utils.py` 会显示 0% 时间，所有耗时都被归到入口脚本上。加上 `--profile-all` 后才能看到每个被导入模块的逐行性能数据。
+
+**`-m` 注意事项**：`-m` 后面必须跟**点分模块名**（如 `cs336_basics.bpe_utils`），不能跟文件路径（如 `cs336_basics/bpe_utils.py`）。这与 `python -m` 的用法一致。
 
 #### 输出解读
 
@@ -771,18 +775,107 @@ Line   %Python  %Native   %Alloc  Code
 
 行号旁的数字（如 `6`、`7`）表示该行占用的 CPU 时间百分比。
 
-### 10.3 对比总结
+#### 只分析特定函数
 
-| 特性 | cProfile | Scalene |
-|------|----------|---------|
-| 分析粒度 | 函数级别 | 行级别 |
-| 内存分析 | ❌ | ✅ |
-| 区分 Python/Native | ❌ | ✅ |
-| 运行开销 | 中等 | 低 |
-| 安装 | 内置 | 需安装 |
-| 可视化 | snakeviz | 内置 HTML/CLI |
+默认 Scalene 分析所有代码。用 `@profile` 装饰器 + `--reduced-profile` 可以只看指定函数：
 
-### 10.4 实际优化案例
+```python
+# bpe_utils.py
+# Scalene 运行时自动注入 @profile，非 Scalene 环境需要兼容处理
+try:
+    profile
+except NameError:
+    def profile(f): return f  # 非 Scalene 环境下是空操作
+
+@profile
+def opt_bpe_merge(...):
+    ...
+```
+
+```bash
+uv run scalene run --reduced-profile --profile-all tests/adapters.py
+```
+
+`--reduced-profile` 表示只显示被 `@profile` 标记的函数的性能数据。
+
+### 10.3 line_profiler（逐行精确计时）
+
+专门做逐行耗时分析的工具，与 Scalene 的采样方式不同，它**精确记录每行的执行次数和耗时**。
+
+#### 安装
+
+```bash
+uv add --dev line-profiler
+```
+
+#### 使用
+
+在要分析的函数上加 `@profile`（line_profiler 运行时自动注入）：
+
+```python
+@profile
+def opt_bpe_merge(...):
+    ...
+```
+
+用 `kernprof` 运行：
+
+```bash
+uv run kernprof -l -v tests/adapters.py
+```
+
+- `-l`：逐行分析（line-by-line）
+- `-v`：运行结束后直接打印结果
+
+#### 输出示例
+
+```
+Line #   Hits     Time  Per Hit   % Time  Line Contents
+   134    500     1.2ms    2.4us    5.0%    for pair in pairs:
+   135    500    15.3ms   30.6us   63.8%        counts[pair] += 1
+   136    500     7.5ms   15.0us   31.2%        if counts[pair] > max_count:
+```
+
+| 字段 | 含义 |
+|------|------|
+| **Hits** | 该行被执行的次数 |
+| **Time** | 该行总耗时 |
+| **Per Hit** | 每次执行的平均耗时 |
+| **% Time** | 占函数总时间的百分比 |
+
+#### 手动计时（最简单，无需安装）
+
+```python
+import time
+
+def opt_bpe_merge(...):
+    t0 = time.perf_counter()
+
+    # 阶段 1
+    ...
+    t1 = time.perf_counter()
+    print(f"阶段1: {t1 - t0:.4f}s")
+
+    # 阶段 2
+    ...
+    t2 = time.perf_counter()
+    print(f"阶段2: {t2 - t1:.4f}s")
+```
+
+### 10.4 对比总结
+
+| 特性 | cProfile | Scalene | line_profiler | 手动计时 |
+|------|----------|---------|---------------|---------|
+| 分析粒度 | 函数级别 | 行级别 | 行级别 | 自定义 |
+| 精度 | 精确（钩子） | 采样 | 精确（钩子） | 精确 |
+| 内存分析 | 不支持 | 支持 | 不支持 | 不支持 |
+| 区分 Python/Native | 不支持 | 支持 | 不支持 | 不支持 |
+| 运行开销 | 中等 | 低 | 高 | 无 |
+| 安装 | 内置 | 需安装 | 需安装 | 内置 |
+| 只分析特定函数 | 不支持 | `@profile` + `--reduced-profile` | `@profile` | 手动插入 |
+| 可视化 | snakeviz | 内置 HTML/CLI | 终端文本 | 无 |
+
+### 10.5 实际优化案例
 
 使用 Scalene 发现 BPE 训练代码的瓶颈：
 
@@ -813,3 +906,120 @@ wc_bytes_dict = new_wc_bytes_dict  # O(1)
 | 重复切片 | 切片一次存入变量 |
 | 每次迭代重新统计频率 | 增量更新，只更新受影响的部分 |
 | 遍历找最大值 | 使用堆（heapq）维护 |
+
+---
+
+## 11. 序列化与反序列化
+
+将 Python 对象（dict、list 等）转换为可存储/传输的格式，以及从该格式还原。
+
+### 11.1 JSON
+
+**适用场景**：配置文件、API 数据交换、人可读的数据存储。
+
+```python
+import json
+
+data = {"name": "Alice", "scores": [95, 87, 92]}
+
+# 序列化
+json_str = json.dumps(data)                    # → str
+json_bytes = json.dumps(data).encode('utf-8')  # → bytes
+with open('data.json', 'w') as f:
+    json.dump(data, f)                         # → 文件
+
+# 反序列化
+obj = json.loads(json_str)                     # str → dict/list
+obj = json.loads(json_bytes)                   # bytes → dict/list
+with open('data.json', 'r') as f:
+    obj = json.load(f)                         # 文件 → dict/list
+```
+
+**限制**：只支持基本类型（str、int、float、bool、None、list、dict）。不支持 tuple、set、bytes、自定义对象。
+
+**速记**：`dumps`/`loads` 操作字符串（s = string），`dump`/`load` 操作文件。
+
+### 11.2 pickle
+
+**适用场景**：缓存复杂 Python 对象、模型保存、进程间通信。
+
+```python
+import pickle
+
+data = {"key": (1, 2), "set": {3, 4}, "bytes": b'\x00\x01'}
+
+# 序列化
+raw = pickle.dumps(data)           # → bytes
+with open('data.pkl', 'wb') as f:
+    pickle.dump(data, f)           # → 文件
+
+# 反序列化
+obj = pickle.loads(raw)            # bytes → 原始对象
+with open('data.pkl', 'rb') as f:
+    obj = pickle.load(f)           # 文件 → 原始对象
+```
+
+**注意**：`pickle.dump(data, f)` 的第二个参数必须是**文件对象**（不是文件名字符串），且文件必须以二进制模式打开（`'wb'`/`'rb'`）。
+
+**安全警告**：不要加载不信任来源的 pickle 文件，pickle 可以执行任意代码。
+
+### 11.3 对比
+
+| | JSON | pickle |
+|---|---|---|
+| 格式 | 文本（人可读） | 二进制 |
+| 跨语言 | 是 | 仅 Python |
+| 支持类型 | 基本类型 | 几乎所有 Python 对象 |
+| 安全性 | 安全 | **不安全**（可执行任意代码） |
+| 速度 | 较慢 | 较快 |
+| 文件模式 | `'r'`/`'w'`（文本） | `'rb'`/`'wb'`（二进制） |
+| 用途 | API、配置文件、数据交换 | 缓存、模型保存、进程间通信 |
+
+---
+
+## 12. 多进程并发 (multiprocessing)
+
+> **详细文档**：[multiprocessing-guide.md](./multiprocessing-guide.md)（含进程数设置、大文件 mmap 处理、实战案例等）
+
+### 12.1 原理简述
+
+Python 的 **GIL** 使多线程无法并行执行 CPU 密集任务。`multiprocessing` 通过 fork 独立子进程绕过 GIL，实现真正并行。
+
+**代价**：进程间不共享内存，数据通过 pickle 序列化传递。
+
+### 12.2 快速上手
+
+```python
+from multiprocessing import Pool
+
+def process_one(s: str) -> str:
+    return s.upper()
+
+if __name__ == '__main__':  # 必须有这个保护！
+    with Pool(4) as pool:
+        results = pool.map(process_one, ["hello", "world"])
+    print(results)  # ['HELLO', 'WORLD']
+```
+
+### 12.3 常用 API
+
+| API | 用途 |
+|-----|------|
+| `Pool.map(func, iterable)` | 并行处理，返回结果列表 |
+| `Pool.starmap(func, iterable)` | 多参数版本 |
+| `Pool.imap_unordered(...)` | 谁先完成谁先返回（最快） |
+| `ProcessPoolExecutor` | 更现代的 API（concurrent.futures） |
+
+### 12.4 注意事项
+
+- **必须** 有 `if __name__ == '__main__'` 保护
+- **不能** 用 lambda 或闭包（无法 pickle）
+- 进程数一般设为 `os.cpu_count() - 1`
+
+### 12.5 场景选择
+
+| 场景 | 用什么 |
+|------|--------|
+| CPU 密集（计算、编码） | `multiprocessing` |
+| IO 密集（网络、文件） | `threading` / `asyncio` |
+| 数据量小 | 单进程（启动开销 > 收益） |

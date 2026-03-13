@@ -10,13 +10,12 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 import regex as re
 
-from cs336_basics.bpe_utils import init_vocab, pre_tokenize, bpe_merge, opt_bpe_merge
+from cs336_basics.bpe_utils import init_vocab, pre_tokenize, parallel_pre_tokenize, bpe_merge, opt_bpe_merge, serialing_data, deserialing_data
 import sys
 
-print(sys.executable)
 import cProfile
 import pstats
-
+import time
 
 def run_linear(
     d_in: int,
@@ -602,16 +601,26 @@ def run_train_bpe(
     """
     
 
-    
-    # 1. init vocab
+    t0 = time.time()
+    # 1. init-vocab
+    print(f"input_path:{input_path}")
     vocab = init_vocab(special_tokens)
+    print(f"1. init-vocab finished: {time.time() - t0:.2f}s")
 
+    t1 = time.time()
     # 2. pre-tokenize
-    wc_bytes_dict = pre_tokenize(input_path, special_tokens)
+    # wc_bytes_dict = pre_tokenize(input_path, special_tokens)
 
-    # 3. bpe merge
+    wc_bytes_dict = parallel_pre_tokenize(input_path, special_tokens)
+    print(f"2. paralleled pre-tokenize finished: {time.time() - t1:.2f}s")
+
+    t2 = time.time()
+
+    # 3. bpe-merge
     # (vocab, merges) = bpe_merge(vocab, wc_bytes_dict, vocab_size)
     (vocab, merges) = opt_bpe_merge(vocab, wc_bytes_dict, vocab_size)
+    print(f"3. bpe-merge finishesd: {time.time() - t2:.2f}s")
+    
 
     return (vocab, merges)
 
@@ -623,7 +632,6 @@ def run_train_bpe(
 # to [""adfsfe few wf f wf wfw wef  ", "fdsffwejngill  fgewgrh  ", " ffewfw "]
 #
 ###################################################################################
-input_path = ""
 # input_path = "/Volumes/ExtremeSSD/github/lmfs_sfd/assignment1-basics/data/TinyStoriesV2-GPT4-train.txt"
 
 # input_path = "/Volumes/ExtremeSSD/github/lmfs_sfd/assignment1-basics/data/tiny_valid_mini.txt"
@@ -637,17 +645,36 @@ input_path = ""
 # profiler = cProfile.Profile()
 # profiler.enable()
 
-vocab, merges = run_train_bpe(
-    input_path="/Volumes/ExtremeSSD/github/lmfs_sfd/assignment1-basics/data/TinyStoriesV2-GPT4-valid.txt",
-    vocab_size=10000,
-    special_tokens=["<|endoftext|>"])
 
 # vocab, merges = run_train_bpe(
 #     input_path="/Volumes/ExtremeSSD/github/lmfs_sfd/assignment1-basics/tests/fixtures/corpus.en",
 #     vocab_size=500,
 #     special_tokens=["<|endoftext|>"])
+# data = (vocab, merges)
+# data2 = None
+# serial_file = './data.pkl' 
+# if serial_file is not None:
+#     serialing_data(serial_file, data)
+
+# data2 = deserialing_data(serial_file)
+# assert data == data2 
+
+# print(list(data[0].items())[:300])
 
 # profiler.disable()
 # stats = pstats.Stats(profiler)
 # stats.sort_stats('cumulative')  # 按累计时间排序
 # stats.print_stats(20)  # 打印前 20 行
+
+
+if __name__ == '__main__':
+    (vocab, merges) = run_train_bpe(
+        input_path="/Volumes/ExtremeSSD/github/lmfs_sfd/assignment1-basics/data/TinyStoriesV2-GPT4-train.txt",
+        vocab_size=10000,
+        special_tokens=["<|endoftext|>"])
+
+    # vocab, merges = run_train_bpe(
+    #     input_path="/Volumes/ExtremeSSD/github/lmfs_sfd/assignment1-basics/tests/fixtures/corpus.en",
+    #     vocab_size=500,
+    #     special_tokens=["<|endoftext|>"])
+    # print(sys.executable)

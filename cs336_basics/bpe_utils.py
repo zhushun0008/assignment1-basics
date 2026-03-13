@@ -1,6 +1,10 @@
 import regex as re
-
-
+from copy import deepcopy
+import pickle
+import os 
+from typing import BinaryIO
+from multiprocessing import Pool
+import time
 def init_vocab(special_tokens):
     # 1. init vocab with bytes
     # 1.1. add special token
@@ -20,7 +24,6 @@ def init_vocab(special_tokens):
 
 def str_to_bts_tuple(input_str: str, encoding: str = "utf-8"):
     return tuple(bytes([b]) for b in input_str.encode(encoding))
-
 
 def pre_tokenize(input_path, special_tokens, **kwargs):
     # wc_dict = {}
@@ -53,6 +56,109 @@ def pre_tokenize(input_path, special_tokens, **kwargs):
             wc_bytes_dict[w_bts] = wc_bytes_dict.get(w_bts, 0) + 1
     
     return wc_bytes_dict
+
+
+def find_chunk_boundaries(
+    file: BinaryIO,
+    desired_num_chunks: int,
+    split_special_token: bytes,
+) -> list[int]:
+    """
+    Chunk the file into parts that can be counted independently.
+    May return fewer chunks if the boundaries end up overlapping.
+    """
+    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
+
+    # Get total file size in bytes
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    file.seek(0)
+
+    chunk_size = file_size // desired_num_chunks
+
+    # Initial guesses for chunk boundary locations, uniformly spaced
+    # Chunks start on previous index, don't include last index
+    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
+    chunk_boundaries[-1] = file_size
+
+    mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+
+    for bi in range(1, len(chunk_boundaries) - 1):
+        initial_position = chunk_boundaries[bi]
+        file.seek(initial_position)  # Start at boundary guess
+        while True:
+            mini_chunk = file.read(mini_chunk_size)  # Read a mini chunk
+
+            # If EOF, this boundary should be at the end of the file
+            if mini_chunk == b"":
+                chunk_boundaries[bi] = file_size
+                break
+
+            # Find the special token in the mini chunk
+            found_at = mini_chunk.find(split_special_token)
+            if found_at != -1:
+                chunk_boundaries[bi] = initial_position + found_at
+                break
+            initial_position += mini_chunk_size
+
+    # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
+    return sorted(set(chunk_boundaries))
+
+
+def pre_tokenize_per_chunk(chunk, special_tokens_pat):
+    
+    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    # PAT = r"""\S+"""
+    sub_chunk_data_list = re.split(special_tokens_pat, chunk)
+    wc_bytes_dict = {}
+    
+    for tmp_doc in sub_chunk_data_list:
+        raw_data = re.finditer(PAT, tmp_doc)
+        for m in raw_data:
+            w = m.group()
+            w_bts = str_to_bts_tuple(w)
+            wc_bytes_dict[w_bts] = wc_bytes_dict.get(w_bts, 0) + 1
+    
+    return wc_bytes_dict
+
+
+def parallel_pre_tokenize(input_path, special_tokens, **kwargs):
+  
+    num_workers = max(1, min(os.cpu_count() - 1, 8))
+    special_tokens_pat = "|".join([re.escape(s) for s in special_tokens])
+            
+    with open(input_path, "rb") as f:
+        t0 = time.time()
+        boundaries = find_chunk_boundaries(f, num_workers, b"<|endoftext|>")
+        print(f"find_chunk_boundaries: {time.time() - t0:.2f} s")
+        
+        async_results = []
+        t1 = time.time()
+        with Pool(num_workers) as pool:
+            # The following is a serial implementation, but you can parallelize this
+            # by sending each start/end pair to a set of processes.
+            for start, end in zip(boundaries[:-1], boundaries[1:]):
+                f.seek(start)
+                chunk = f.read(end - start).decode("utf-8", errors="ignore")
+                async_results.append(pool.apply_async(pre_tokenize_per_chunk, args = (chunk, special_tokens_pat)))
+            
+            print(f"submit tasks: {time.time() - t1:.2f}s")
+
+            t2 = time.time()
+            
+            results = [ar.get() for ar in async_results]
+            print(f"get results: {time.time() - t2:.2f}s")
+        
+    
+    merge_dict = {}
+    t3 = time.time()
+    for d in results:
+        for k,v in d.items():
+            merge_dict[k] = merge_dict.get(k, 0) + v
+    
+    print(f"merge: {time.time() - t3:.2f}s")
+
+    return merge_dict
 
 def bpe_merge(vocab, wc_bytes_dict, vocab_size, max_merge_runs=None):
     merges = []
@@ -114,7 +220,30 @@ def bpe_merge(vocab, wc_bytes_dict, vocab_size, max_merge_runs=None):
     return (vocab, merges)
 
 
+def update_pair_cnt_and_get_max_cnt(wc_bytes_dict, pair_cnt_dict):
 
+    max_freq = 0
+    for w_bts, cnt in wc_bytes_dict.items():
+      # print(w_bts)
+      # w = w_bts.decode('utf-8')
+      # print(w)
+      for i in range(len(w_bts) - 1):
+          pair = w_bts[i : i + 2]
+          pair_cnt_dict[pair] = pair_cnt_dict.get(pair, 0) + cnt
+          if pair_cnt_dict[pair] > max_freq:
+              max_freq = pair_cnt_dict[pair]
+
+    return max_freq
+
+def serialing_data(file_name, data):
+    with open(file_name, 'wb') as f:
+        pickle.dump(data, f)
+        
+def deserialing_data(file_name):
+    obj = None
+    with open(file_name, 'rb') as f:
+        obj = pickle.load(f)
+    return obj
 
 def opt_bpe_merge(vocab, wc_bytes_dict, vocab_size, max_merge_runs=None):
     merges = []
@@ -140,6 +269,8 @@ def opt_bpe_merge(vocab, wc_bytes_dict, vocab_size, max_merge_runs=None):
                     max_freq = pair_cnt_dict[pair]
                     # max_pair = pair
         # take the lexicographically greater pair
+        
+        
         max_freq_pair_list = []
         for pair, cnt in pair_cnt_dict.items():
             if cnt == max_freq:
